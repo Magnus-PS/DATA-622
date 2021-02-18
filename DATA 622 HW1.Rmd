@@ -1,0 +1,337 @@
+---
+title: "DATA 622 HW1"
+author: "Magnus Skonberg"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: false
+        theme: cerulean
+        highlight: tango
+        font-family: "Arial"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(palmerpenguins)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(MBESS)
+library(MASS)
+library(pROC)
+library(nnet)
+```
+
+## Background
+
+The purpose of the assignment was to explore *logistic and multinomial logistic regression*.
+
+...............................................................................
+
+
+## 1 - Logistic Regression with Binary Outcome
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 5px; padding: 20px;}
+</style>
+<div class = "blue">
+
+(a) The penguin dataset has ‘species’ column. Please check how many categories you have in the species column. Conduct whatever data manipulation you need to do to be able to build a logistic regression with binary outcome. Please explain your reasoning behind your decision as you manipulate the outcome/dependent variable (species).
+
+(b) Please make sure you are evaluating the independent variables appropriately in deciding which ones should be in the model.
+
+(c) Provide variable interpretations in your model.
+
+</div> \hfill
+
+First, we perform a light exploration of our dataset to familiarize ourselves:
+
+```{r, results = FALSE, message = FALSE, warning = FALSE}
+#We're going to deal with the Palmer penguins dataset:
+data(penguins)
+
+#Perform 'light EDA' to familiarize ourselves with the dataset:
+glimpse(penguins)
+summary(penguins)
+
+```
+
+We then explore how many categories there are in the species column:
+
+```{r}
+#Categories in species column
+penguins %>%
+  group_by(species) %>%
+  count() #there are THREE categories
+```
+
+From the output above, we see that there are THREE categories in the species column: Adelie, Gentoo, and Chinstrap. Adelie is the most popular species, followed by Gentoo and then Chinstrap. 
+
+**Being that Adelie was the most popular, I elected to use whether the species was or was not Adelie to be the binary outcome for our logistic regression model.**
+
+First, we remove NA values, set our outcome to be binary, and then we apply logistic regression to a full model (all variables):
+
+```{r}
+#Remove NAs
+penguins <- penguins %>% na.omit() #this step is essential for consistent dataframe length (later)
+
+#Adelie or NOT Adelie
+penguins$adelie <- ifelse(penguins$species == 'Adelie', 1, 0)
+
+#Build binary outcome logistic regression model (with all vars):
+model_1 <- glm(adelie ~., family=binomial(link='logit'), data=penguins)
+summary(model_1)
+
+```
+
+For **continuous variables**, the interpretation is as follows:
+
+* For every unit increase in bill_length_mm, the log odds of being Adelie decrease by 2.923 * 10^-8.
+* For every unit increase in bill_depth_mm, the log odds of being Adelie increase by 1.535 * 10^-7.
+* For every unit increase in flipper_length_mm, the log odds of being Adelie decrease by 1.611 * 10^-8.
+* For every unit increase in body_mass_g, the log odds of being Adelie increase by 1.164 * 10^-10.
+* For every unit increase in year, the log odds of being Adelie decrease by -3.261 * 10^-9.
+
+For **categorical variables**, the interpretation is as follows:
+
+* If the species is Chinstrap or Gentoo, the log odds of being Adelie decrease by -5.313 * 10^1.
+* If the island is Dream, the log odds of being Adelie decrease by -1.090 * 10^-7.
+* If the sland is Torgersen, the log odds of being Adelie decrease by -2.402 * 10^-6.
+* If the sex is male, the log odds of being Adelie increase by 7.256 * 10^-8.
+
+In addition to the variable interpretations above, we can pull from the summary statistics. The summary statistics provide us with an AIC value of 22 and p-values of 1. 
+
+From these statistics, we determine that there's likely a better model and thus we'll optimize based on AIC (by applying the stepAIC function) and p-value (by adding variables back into our model one-by-one) to compare the model difference (if any):
+
+```{r, results = FALSE, message = FALSE, warning = FALSE}
+
+#Optimize model based on AIC value:
+model_2 <- stepAIC(model_1)
+
+#Optimize model based on p-value:
+model_3 <- glm(adelie ~ bill_length_mm + bill_depth_mm, family=binomial(link='logit'), data=penguins)
+```
+
+The results of our models are provided below:
+
+```{r}
+#AIC optimized output:
+summary(model_2)
+
+#p-value optimized output:
+summary(model_3)
+
+```
+
+Optimizing based on AIC (Akaike Information Criteria) value resulted in a model that:
+
+* included variables bill_length_mm, bill_depth_mm, and sexmale,
+* had an AIC value of 8, and 
+* all p-values approximately 1.
+
+The magnitude of the p-values seemed strange to me and so I optimized once again, this time based on p-value. This resulted in a model that:
+
+* included variables bill_length_mm and bill_depth_mm,
+* had an AIC value of 24.708, and
+* all p-values well beneath the 0.05 threshold.
+
+Thus, we had conflicting models. On one hand we had a model with a superior AIC score and on the other we had one with superior p-values yet a diminished AIC score. **I elected to proceed with the superior AIC score model (model_2) due to the predictive promise that a lower AIC score is indicative of.**
+
+Between the two models, the only difference was the inclusion of the sexmale variable. This variable raised the collective p-values of model_2 while simultaneously lowering its AIC score. bill_length_mm and bill_depth_mm appear to provide the greatest indication of what species of penguin we're dealing with. Alone, each of their p-values were well below the 0.05 threshold (see model_3) but the two variables together may not provide the best fit for the data they were generated from and thus it was necessary to include an additional variable (the sexmale variable) to optimize our model's ability to fit the data it was derived from.
+
+As a next step, we assess the accuracy of our model ...
+
+
+## 2 - Model Assessment
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 5px; padding: 20px;}
+</style>
+<div class = "blue">
+
+For your model from #1, please provide: AUC, Accuracy, TPR, FPR, TNR, FNR.
+
+* AUC: Area Under Curve (Accuracy)
+* Confusion Matrix = True Positive Rate, False Positive Rate, True Negative Rate, False Negative Rate
+
+</div> \hfill
+
+
+```{r}
+#Assess probability of being Adelie
+summary(model_2$fitted.values)
+
+#Analyze histogram of our fitted values
+hist(model_2$fitted.values,main = " Histogram",xlab = "Probability of Adelie", col = "blue")
+
+```
+
+Based on the summary statistics, we get an idea of the range of values produced by our model and when we visualize these values, we see that our data has successfully been batched into two camps: 0.0 and 1.0, where we can interpret 1.0 as being of species Adelie and we can interpret 0.0 as NOT being of species Adelie. 
+
+The fact that the NOT bar is taller than the Adelie bar is a positive indication, but we'll dig further into the accuracy of our model via AUC and Confusion Matrix:
+
+```{r, message = FALSE, warning = FALSE}
+#length(penguins$adelie) #0,1 - 344
+#length(model_2$fitted.values) #2.2 * 10^-16, 1 - 333
+
+#Add Prediction column to penguins df based on model_2's fitted values:
+penguins$Predict <- ifelse(model_2$fitted.values > 0.5,"+ve","-ve")
+
+#Observe Confusion matrix:
+mytable <- table(penguins$adelie,penguins$Predict)
+rownames(mytable) <- c("Obs -ve","Obs +ve")
+colnames(mytable) <- c("Pred -ve","Pred +ve")
+mytable
+
+#Observe model accuracy:
+accuracy <- sum(diag(mytable))/sum(mytable)
+accuracy #100%
+
+```
+
+Based on the Confusion Matrix, our results are as follows:
+
+* True Positive Result (TPR): 146 / 146 = 100%
+* False Positive Result (FPR): 0 / 146 = 0%
+* True Negative Result (TNR): 187 / 187 = 100%
+* False Negative Result (FNR): 0 / 187 = 0%
+
+We then take the sum of the diagonal of our Confusion Matrix (our True values) and put that over the sum of all values. As you may have expected, **the output is 1.0 or 100% accuracy.**
+
+*Note: we dropped NA values prior to constructing our model and thus we ended up dropping 11 observations which may have challenged our model and resulted in False Positives or Negatives.
+
+Regardless, based on our Confusion Matrix, the model appears to be strong. We then move on to verify our model's ROC and AUC:
+
+```{r, message = FALSE, warning = FALSE}
+#Observe ROC and AUC:
+roc(adelie~model_2$fitted.values, data = penguins, plot = TRUE, main = "ROC CURVE", col= "blue")
+auc(adelie~model_2$fitted.values, data = penguins)
+
+```
+
+The ROC (Receiver Operating Characteristic) curve utilizes Sensitivity vs Specificity to measure the performance of a model. In our case, the ROC "curve" forms a unit box with a Specificity of 1.0 to a Sensitivity of 1.0.
+
+The AUC (Area Under Curve) measures the fitted values of our model vs. our adelie value. A value of 1.0 in this realm is a perfect score and our model received a 1.0 :)
+
+**Based on the AUC, accuracy, and Confusion Matrix, we appear to have a very strong model on our hands. Thus, choosing to optimize our model based on its AIC score appears to have been a good decision in this case.**
+
+
+## 3 - Multinomial Logistic Regression
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 5px; padding: 20px;}
+</style>
+<div class = "blue">
+
+(a) Please apply multinomial logistic regression where your outcome variable is ‘species’.
+
+(b) Evaluate the independent variables appropriately to fit your most parsimonious model.
+
+(c) Please be sure to interpret your variables in the model.
+
+</div> \hfill
+
+I took "most parsimonious model" to mean that we're looking for the optimal prediction with as few predictor variables as possible. In other words, we want our model to be as accurate as possible with as few independent variables as possible:
+
+As such, I followed a similar approach to #2 where NA values were removed, the model was applied (this time using the multinom() function), and then the model was optimized using the stepAIC() function:
+
+```{r, results = FALSE, message = FALSE, warning = FALSE}
+#'Refresh' the Palmer penguins dataset:
+data(penguins)
+
+#Remove NAs
+penguins <- penguins %>% na.omit()
+#is.factor(penguins$species)
+#levels(penguins$species)
+
+#Build multinomial logistic regression model (with all vars):
+s_model_1 <- multinom(species ~., data=penguins, model = TRUE)
+
+#Optimize model based on AIC value (as per #2):
+s_model_2 <- stepAIC(s_model_1)
+```
+
+
+```{r}
+#Review summary statistics
+summary(s_model_1)
+summary(s_model_2)
+
+```
+
+When we look at the full model's summary statistics, we get a model that:
+
+* included ALL variables,
+* had an AIC value of 36, and 
+* a residual deviance of 7.087 * 10^-6
+
+Optimizing based on AIC (Akaike Information Criteria) value resulted in a model that:
+
+* included variables bill_length_mm, bill_depth_mm, and sexmale,
+* had an AIC value of 16.981, and 
+* residual deviance of ~0.981.
+
+If you recall, the variables that remain in our AIC-optimized model are consistent with those from pt 1 of this assignment: bill_length_mm, bill_depth_mm, and sex. It appears that although we varied the levels of our dependent variable, the optimal model was consistent. I don't know if this assumption can be extended to models of even greater level (ie. 4,5,6 species) but it's at least thought-provoking.
+
+Being that I provided a rather in-depth variable interpretation for the full model in pt.1 of the assignment, I'll interpret the variables and the relationship between their coefficient and each level (is this indicative of Adelie, Gentoo or Chinstrap?) here:
+
+**Chinstrap = -242.974 + 14.889 * bill_length_mm -21.914 * bill_depth_mm - 36.905 * sexmale**
+
+* The negative intercept coefficient is indicative that Chinstrap is the least popular species.
+* The positive bill_length_mm coefficient can be interpreted as bill length being positively correlated with the species being Chinstrap.
+* The negative bill_depth_mm coefficient can be interpreted as bill depth being negatively correlated with the species being Chinstrap.
+* The negative sexmale coefficient can be interpreted as penguins of the male sex being negatively correlated with the species being Chinstrap.
+
+**Gentoo = 121.047 + 14.806 * bill_length_mm -44.697 * bill_depth_mm - 0.130 * sexmale**
+
+* The positive intercept coefficient is indicative that Gentoo is one of the most popular species.
+* The positive bill_length_mm coefficient can be interpreted as bill length being positively correlated with the species being Gentoo.
+* The *highly negative* bill_depth_mm coefficient can be interpreted as bill depth being very negatively correlated with the species being Gentoo.
+* The *slightly negative* sexmale coefficient can be interpreted as the penguin's sex be nonindicative of the species being Gentoo.
+
+And while Adelie does not appear in our coefficients or summary statistics, it's safe to say if a species is not Chinstrap or Gentoo, then it's Adelie. In other words, the Adelie species make up our 0 (or near 0) values.
+
+
+## 4 - Extra Credit
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 5px; padding: 20px;}
+</style>
+<div class = "blue">
+
+What would be some of the fit statistics you would want to evaluate for your model in question #3? Feel free to share whatever you can provide.
+
+</div> \hfill
+
+
+For my model in question 3, I would want to evaluate:
+
+* **typical metrics** : the p-value (<= 0.05 threshold preferred), residual error (lower values are better), McFadden's R-squared value (higher values are better), and AIC values (lower values are better). These are typically generated via our summary statistics and thus provide the best early indication regarding how well our model can represent the data it was generated from. Alternatively, we might use R's built-in *glance()* function to check. We also might consider providing *confidence intervals* for the independent variables as well as our predictions to gain better insight into what level of confidence there might be behind our variable selection and/or model's predictive capabilities.
+
+* **Likelihood ratio test** : we can compare the likelihood of our data under a full model against that of select variables. Removing independent variables will tend to make the model fit our data less acurrately but it may be necessary to test the statistical significance of a less expansive model.
+
+* **Classification error rate** : we can break our data into a training and testing subset, train our model based on the training set, and then observe the accuracy of our model's predictions based on the training set and the test set. This can provide an application-base accuracy metric based on our model's classification capabilities. Being that goodness of fit depends highly on our training-test split, we can test our classification via multiple iterations on different training-test splits to further improve confidence in our classification error rate.
+
+
+Being that I'm early in this Data Science journey, it's more-than-likely that I've overlooked other useful fit statistics. This list is not comprehensive, rather it's a "starting line" of sorts. One that will clarify via experimentation, exposure, feedback, time and experience.
+
+--------------------------------------------------------------------------------
+
+## References
+
+In solving Homework #1, I referred to the following:
+
+1. Akanksha Rawat. (2017). **Binary Logistic Regression** [article]. Retrieved from https://towardsdatascience.com/implementing-binary-logistic-regression-in-r-7d802a9d98fe
+
+2. Parul Pandey. (2019). **Simplifying the ROC and AUC metrics.** [article]. Retrieved from https://towardsdatascience.com/understanding-the-roc-and-auc-curves-a05b68550b69#:~:text=AUC%20stands%20for%20Area%20under,of%20one%20model%20to%20another.&text=This%20means%20that%20the%20Red%20curve%20is%20better.
+
+3. Mohit Sharma. (2018). **Multinomial Logistic Regression Using R.** [article]. Retrieved from https://datasciencebeginners.com/2018/12/20/multinomial-logistic-regression-using-r/
+
+4. Alboukadel Kassambar. (2018). **Regression Model Accuracy Metrics** [article]. Retrieved from http://www.sthda.com/english/articles/38-regression-model-validation/158-regression-model-accuracy-metrics-r-square-aic-bic-cp-and-more/
+
+5. R bloggers. (2015). **Evaluating Logistic Regression Models** [article]. Retrieved from https://www.r-bloggers.com/2015/08/evaluating-logistic-regression-models/
