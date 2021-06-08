@@ -1,0 +1,301 @@
+---
+title: "DATA 622 HW2"
+author: "Magnus Skonberg"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: false
+        theme: cerulean
+        highlight: tango
+        font-family: "Arial"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(palmerpenguins)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(mice)
+library(MASS)
+library(caret)
+library(e1071)
+```
+
+## Background
+
+The purpose of the assignment was to explore *linear discriminant analysis (LDA), quadratic discriminant analysis (QDA), and naive Bayes* as applied to the Palmer penguin dataset.
+
+................................................................................
+
+## Data Preprocessing
+
+Before we explore LDA, QDA, and naive Bayes, as applied to the data at hand, we first have to re-famiarize ourselves with the data at hand and evaluate all 'features' to see what should be in our model.
+
+We'll perform EDA, select our features based on pertinence and correlation, and then verify our selection for consistencies or inconsistencies with the output of the caret package's featurePlot.
+
+### Exploratory Data Analysis (EDA)
+
+First, we load in the data and re-familiarize ourselves with the penguins dataset:
+
+```{r, results = FALSE, message = FALSE, warning = FALSE}
+#We're going to deal with the Palmer penguins dataset:
+data(penguins)
+
+#Perform 'light EDA' to familiarize ourselves with the dataset:
+glimpse(penguins)
+summary(penguins)
+```
+
+We utilize the built-in glimpse() and summary() functions to gain insight into the dimensions, variable characteristics, and value range for our penguin dataset.
+
+We observe the presence of a non-pertinent 'year' variable as well as the presence of NA values in varying quantities across a number of our variables. We also see that we're dealing with (3) factors and (5) numeric variables. As a next step, we'll visualize, explore further, and elect which features to carry forward and which to drop.
+
+### Feature Selection
+
+We visualize and explore our dataset with a scatter plot, a simple count() table, and a correlation matrix:
+
+```{r, message = FALSE, warning = FALSE}
+#Scatter plot of all explanatory variables vs. response
+tall <- gather(penguins, metric, value, -species)
+ggplot(tall, aes(x = value, y = species)) +
+  geom_point(alpha = .2) +
+  geom_smooth(method = 'lm', se = FALSE) +
+  facet_wrap(~metric, scales = 'free')
+
+```
+
+The scatter plot above provides early indication as to which variables should be in our model:
+
+* **strong variables**: we can see that species (our response variable) varies based on bill_depth_mm, bill_length_mm, body_mass_g, and flipper_length_mm. Thus, their inclusion appears to add value to our model. *With that said, the scatter plots for flipper length and body mass are quite similar.*
+* **weak variables** sex and year can be noted by the fact that their corresponding scatter plots provide no clear delineation of variation in species (our response variable) based on their inclusion.
+
+Being that we were planning on excluding the year variable, we'll explore whether there's merit to the exclusion of sex.
+
+```{r}
+#Categories in species column
+penguins %>%
+  group_by(species, sex) %>%
+  count()
+```
+
+It appears that there is. It appears that the sex follows a ~50/50 split regardless of species and thus dropping sex from consideration would be a model upgrade.
+
+Next we explore a correlation matrix to dig a little deeper into the earlier mentioned scatter plot similarities between flipper length and body mass:
+
+```{r, message = FALSE, warning = FALSE}
+#Correlation matrix
+library(corrplot)
+pen_corr <- penguins %>%
+    select_if(is.numeric) %>%
+    drop_na() %>%
+    cor()
+pen_corr
+
+corrplot(pen_corr)
+
+```
+
+`flipper_length_mm` is strongly correlated with `body_mass_g` and thus only one of the variables should be carried forward in our model. I elected `body_mass_g` since it had weaker correlation with the other variables than `flipper_length_mm`.
+
+Thus, we'll drop `flipper_length_mm`, `sex`, and `year` from consideration:
+
+```{r,message = FALSE, warning = FALSE}
+#Drop impertinent variables
+skinny_penguins <- dplyr::select(penguins, -c(sex, year, flipper_length_mm))
+##head(skinny_penguins) #verification
+```
+
+As a final step in pre-processing our data, we have to deal with missing values:
+```{r,message = FALSE, warning = FALSE}
+#summarize missing data totals by feature
+colSums(is.na(skinny_penguins))
+```
+
+From above, we see that we're missing 2 values in 2 separate features and that these features are numeric. Rather than dropping them, we can impute using the **pmm method** (predictive mean matching):
+
+Predictive mean matching calculates the predicted value for our target variable, and, for missing values, forms a small set of “candidate donors” from the complete cases that are closest to the predicted value for our missing entry. Donors are then randomly chosen from candidates and imputed where values were once missing. To apply pmm we assume that the distribution is the same for missing cells as it is for observed data, and thus, the approach may be more limited when the % of missing values is higher.
+
+Once we’ve imputed missing values into our training dataset and returned the data in proper form, we verify whether our operation was successful:
+
+```{r,message = FALSE, warning = FALSE}
+#Impute missing values
+skinny_penguins <- mice(data = skinny_penguins, m = 1, method = "pmm", seed = 500)
+skinny_penguins <- mice::complete(skinny_penguins, 1)
+
+#verify absence of NA values in the dataset
+colSums(is.na(skinny_penguins))
+
+```
+
+The presence of all 0’s above confirms the success of imputation.
+
+At this point we've dealt with NA values and non-pertinent variables. Our model has simplified from 7 independent variables to the 4 noted below:
+
+* **island** - independent, categorical variable
+* **bill_length_mm** - independent numeric variable
+* **bill_depth_mm** - independent, numeric variable
+* **body_mass_g** - independent numeric variables
+
+### Verification via featurePlot
+
+Before, we train-test split our data and then move on to exploring each generative model, we'll verify our variable selection using the caret package's featurePlot:
+
+```{r, message = FALSE, warning = FALSE}
+featurePlot(x = penguins[,-1], 
+            y = penguins$species, 
+            plot = "pairs",
+            ## Add a key at the top
+            auto.key = list(columns = 3))
+```
+
+Consulting the scatter plot matrix, while a bit hard to read and digest, appears to confirm our variable selection and so we proceed with performing a train-test split:
+
+```{r}
+#Split the data into 80% training and 20% test sets
+set.seed(123)
+
+partition <- skinny_penguins$species %>%
+    createDataPartition(p = 0.8, list = FALSE)
+train <- skinny_penguins[partition, ]
+test <- skinny_penguins[-partition, ]
+
+```
+
+With 80% of our data in the training set and 20% of our data in the testing set, we're prepared to fit our data with the generative models at hand.
+
+................................................................................
+
+
+## Linear Discriminant Analysis
+
+LDA uses Bayes' Theorem to estimate probabilities. The probability that an input belongs to each class is used to predict the output class, and the class with the highest probability is cast as the prediction. 
+
+We fit our model using the built-in lda() function, we then pass our training and testing data through the model to cast predictions (taking the class), we store these predictions, compare with the actual test data, and then tabularize the result:
+
+```{r}
+# Fit the model
+pen_lda = lda(species ~ ., data = train)
+pen_lda
+
+pen_lda_trn_pred = predict(pen_lda, train)$class
+pen_lda_tst_pred = predict(pen_lda, test)$class
+
+calc_class_err = function(actual, predicted) {
+  mean(actual != predicted)
+}
+
+calc_class_err(predicted = pen_lda_trn_pred, actual = train$species) #0
+calc_class_err(predicted = pen_lda_tst_pred, actual = test$species) #0
+
+table(predicted = pen_lda_tst_pred, actual = test$species)
+
+```
+Based on the error calculations above, our results are as follows:
+
+* **Train error:** 0%
+* **Test error:** 0%
+
+Based on the Confusion Matrix for our test set, our results are as follows:
+
+* **True Positive Result (TPR):** 67 / 67 = 100%
+* **False Positive Result (FPR):** 0 / 67 = 0%
+
+We then take the sum of the diagonal of our Confusion Matrix (our True values) and put that over the sum of all values. As you may have expected, **the output is 1.0 or 100% test accuracy.**
+
+
+## Quadratic Discriminant Analysis
+
+QDA is a more general version of LDA. It's important to note the nomial difference: **linear vs. quadratic**. The difference between LDA and QDA is that LDA assumes the feature covariance matrices are the same and that the decision boundary is linear. QDA, by comparison, allows for different feature covariance matrices which allows for a nonlinear, or quadratic, decision boundary.
+
+We fit our model using the built-in qda() function, we then pass our training and testing data through the model to cast predictions (taking the class), we store these predictions, compare with the actual test data, and then tabularize the result:
+
+```{r}
+# Fit the model based on 2 variables
+pen_qda = qda(species ~ bill_length_mm + bill_depth_mm, data = train)
+pen_qda
+
+pen_qda_trn_pred = predict(pen_qda, train)$class
+pen_qda_tst_pred = predict(pen_qda, test)$class
+
+calc_class_err(predicted = pen_qda_trn_pred, actual = train$species)
+calc_class_err(predicted = pen_qda_tst_pred, actual = test$species)
+
+table(predicted = pen_qda_tst_pred, actual = test$species)
+```
+
+Based on the error calculations above, our results are as follows:
+
+* **Train error:** 4.3%
+* **Test error:** 0%
+
+Based on the Confusion Matrix for our test set, our results are as follows:
+
+* **True Positive Result (TPR):** 67 / 67 = 100%
+* **False Positive Result (FPR):** 0 / 67 = 0%
+
+We then take the sum of the diagonal of our Confusion Matrix (our True values) and put that over the sum of all values. As you may have expected, **the output is 1.0 or 100% test accuracy.**
+
+With two fewer variables to consider, the QDA model saved on computational power and model complexity and was *still* 100% accurate.
+
+
+## Naïve Bayes
+
+Bayes Theorem provides a means of calculating conditional probability that, while deceptively simple, is incredibly powerful:
+
+**P(A|B) = (P(B|A) * P(A)) / P(B)**
+
+LDA, QDA, and Naive Bayes all utilize Bayes' Theorem to estimate their probabilities. Where Naive Bayes differs is that it assumes the independence of features within its consideration. Where there is strong correlation between variables, this can create a problem, but where the correlation is limited, the predictions are quite accurate.
+
+We fit our model using the built-in naiveBayes() function, we then pass our training and testing data through the model to cast predictions, we store these predictions, compare with the actual test data, and then tabularize the result:
+
+```{r}
+pen_nb = naiveBayes(species ~ ., data = train)
+pen_nb
+
+pen_nb_trn_pred = predict(pen_nb, train)
+pen_nb_tst_pred = predict(pen_nb, test)
+
+calc_class_err(predicted = pen_nb_trn_pred, actual = train$species)
+calc_class_err(predicted = pen_nb_tst_pred, actual = test$species)
+
+table(predicted = pen_nb_tst_pred, actual = test$species)
+
+```
+
+Based on the error calculations above, our results are as follows:
+
+* **Train error:** 2.2%
+* **Test error:** 1.5%
+
+Based on the Confusion Matrix for our test set, our results are as follows:
+
+* **True Positive Result (TPR):** 66 / 67 = 98.5%
+* **False Positive Result (FPR):** 1 / 67 = 1.5%
+
+We then take the sum of the diagonal of our Confusion Matrix (our True values) and put that over the sum of all values. **The output is 0.985 or 98.5% test accuracy.**
+
+The naive Bayes classifier performed quite well with just 1 (mislabeled Chinstrap) error.
+
+
+## Analysis
+
+Without even visualizing AUC (Area Under Curve), we can tell from the statistics above that the LDA and QDA models were optimal. The naive Bayes model, while still performing well, had 98.5% test accuracy as compared to 100% for the LDA and QDA models. Naive Bayes did not get to show its strength, the ability to handle a large number of predictors (even with a limited sample size), since LDA and QDA performed well given a relatively lower number of predictors.
+
+With this said, the QDA model accounted for fewer variables and was thus less complex and computationally expensive, while the LDA model performed with 100% test and train accuracy as compared to the QDA model's 100% test and 95.7% train accuracy. This creates a bit of a 'toss up' in deciding between the models. **QDA would be recommended as the less complex model while LDA would be recommended as the more consistent model since it performed well on training and test data.**
+
+................................................................................
+
+
+## References
+
+The process and analysis, executed above, was made with reference to the following resources:
+
+* David Dalpiaz. (2020). 'Chapter 11 Generative Models' **R for Statistical Learning** [book]. Retrieved from: https://daviddalpiaz.github.io/r4sl/generative-models.html
+* Abdul Majed Raja RS. (2020). **Penguins Dataset Overview** [article]. Retrieved from: https://towardsdatascience.com/penguins-dataset-overview-iris-alternative-9453bb8c8d95
+* Alboukadel Kassambara. (2018). **Discriminant Analysis Essentials in R**. Retrieved from: http://www.sthda.com/english/articles/36-classification-methods-essentials/146-discriminant-analysis-essentials-in-r/
